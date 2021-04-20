@@ -1,49 +1,110 @@
-#!/usr/bin/env bash
-​
-# Colors
-blue=$'\033[0;34m'
-cyan=$'\033[1;96m'
-reset=$'\033[0;39m'
-​
-# Avoid boring prefix in du/df/etc
-cd $HOME
-​
-initial_used_space=$(df -h $HOME | grep -v 'Filesystem' | awk '{ printf("%f", $3) }')
-​
-# Show current used space
-initial_df=$(df -h . | grep --color=always -E "Size|Used|Avail|Capacity|[0-9]*\.*[0-9]*Mi|[0-9]*\.*[0-9]*Gi|[0-9]+\.*[0-9]+% |$")
-echo -e "${blue}Current space:\n${reset}${initial_df}${reset}"
-echo -e "${blue}\nHome folder:${reset}"
-du -hd1 . 2>/dev/null | sort -h | grep --color=always "[0-9]*\.*[0-9]*M\t\|[0-9]*\.*[0-9]*G\t\|$"
-echo ""
-​
-function delete() {
-	read -n1 -p "${blue}Delete ${cyan}$1${blue} ? [y/${cyan}N${blue}]${reset} " input
-	echo ""
-	if [ -n "$input" ] && [ "$input" = "y" ]; then
-		rm -rf $1
-	fi
-}
-​
-# Delete heavy files/folders
-delete "./.cache/*"
-delete "./Library/Caches/*"
-delete "./Library/Containers/com.docker.docker/*"
-delete "./Library/Containers/*"
-delete "./Downloads/*"
-​
-# Brew cleanup
-read -n1 -p "${blue}Cleanup Homebrew? (${cyan}brew cleanup${blue}) [y/${cyan}N${blue}]${reset} " input
-echo ""
-if [ -n "$input" ] && [ "$input" = "y" ]; then
-	brew cleanup ;:
+#!/bin/bash -eux
+du -sh /var/cache/apt/archives
+sudo apt-get clean
+sudo apt-get autoremove --purge -y
+sudo apt clean
+sudo apt -s clean
+sudo apt clean all
+sudo apt autoremove
+sudo apt-get clean
+sudo apt-get -s clean
+sudo apt-get clean all
+sudo apt-get autoclean -y
+#Remove Old Log Files
+sudo rm -f /var/log/*gz
+# Remove Thumbnail Cache
+rm -rf ~/.cache/thumbnails/*
+# Remove old snaps
+set -eu
+snap list --all | awk '/disabled/{print $1, $3}' |
+    while read snapname revision; do
+        sudo snap remove "$snapname" --revision="$revision"
+    done
+SSH_USER=${SSH_USERNAME:-vagrant}
+DISK_USAGE_BEFORE_CLEANUP=$(df -h)
+# Make sure udev does not block our network - http://6.ptmc.org/?p=164
+echo "==> Cleaning up udev rules"
+rm -rf /dev/.udev/
+rm /lib/udev/rules.d/75-persistent-net-generator.rules
+
+echo "==> Cleaning up leftover dhcp leases"
+# Ubuntu 10.04
+if [ -d "/var/lib/dhcp3" ]; then
+    rm /var/lib/dhcp3/*
 fi
-​
-# Show before/after
-echo -e "${blue}\nSpace before:\n${reset}${initial_df}${blue}\n\nSpace after:${reset}"
-df -h . | grep --color=always -E "Size|Used|Avail|Capacity|[0-9]*\.*[0-9]*Mi|[0-9]*\.*[0-9]*Gi|[0-9]+\.*[0-9]+% |$"
-​
-final_used_space=$(df -h $HOME | grep -v 'Filesystem' | awk '{ printf("%f", $3) }')
-freed_space=$(printf "%.1f" $(echo -e "${initial_used_space} - ${final_used_space}" | bc))
-echo -e "${blue}\nFreed space: ${cyan}${freed_space}Gi${reset}"
-echo -e "${blue}Pro tip: use ${cyan}GrandPerspective${blue} (GUI, available in the MSC) or ${cyan}ncdu${blue} (terminal, available with brew) to show a deep scan of your space.${reset}"
+# Ubuntu 12.04 & 14.04
+if [ -d "/var/lib/dhcp" ]; then
+    rm /var/lib/dhcp/*
+fi
+
+# Blank machine-id (DUID) so machines get unique ID generated on boot.
+# https://www.freedesktop.org/software/systemd/man/machine-id.html#Initialization
+echo "==> Blanking systemd machine-id"
+if [ -f "/etc/machine-id" ]; then
+    truncate -s 0 "/etc/machine-id"
+fi
+
+# Add delay to prevent "vagrant reload" from failing
+echo "pre-up sleep 2" >> /etc/network/interfaces
+
+echo "==> Cleaning up tmp"
+rm -rf /tmp/*
+
+# Cleanup apt cache
+apt-get -y autoremove --purge
+apt-get -y clean
+apt-get -y autoclean
+
+echo "==> Installed packages"
+dpkg --get-selections | grep -v deinstall
+
+# Remove Bash history
+unset HISTFILE
+rm -f /root/.bash_history
+rm -f /home/${SSH_USER}/.bash_history
+
+# Clean up log files
+find /var/log -type f | while read f; do echo -ne '' > "${f}"; done;
+
+echo "==> Clearing last login information"
+>/var/log/lastlog
+>/var/log/wtmp
+>/var/log/btmp
+
+# Whiteout /boot
+count=$(df --sync -kP /boot | tail -n1 | awk -F ' ' '{print $4}')
+let count--
+dd if=/dev/zero of=/boot/whitespace bs=1024 count=$count
+rm /boot/whitespace
+
+echo '==> Clear out swap and disable until reboot'
+set +e
+swapuuid=$(/sbin/blkid -o value -l -s UUID -t TYPE=swap)
+case "$?" in
+    2|0) ;;
+    *) exit 1 ;;
+esac
+
+set -e
+if [ "x${swapuuid}" != "x" ]; then
+    # Whiteout the swap partition to reduce box size
+    # Swap is disabled till reboot
+    swappart=$(readlink -f /dev/disk/by-uuid/$swapuuid)
+    /sbin/swapoff "${swappart}"
+    dd if=/dev/zero of="${swappart}" bs=1M || echo "dd exit code $? is suppressed"
+    /sbin/mkswap -U "${swapuuid}" "${swappart}"
+fi
+
+# Zero out the free space to save space in the final image
+dd if=/dev/zero of=/EMPTY bs=1M  || echo "dd exit code $? is suppressed"
+rm -f /EMPTY
+
+# Make sure we wait until all the data is written to disk, otherwise
+# Packer might quite too early before the large files are deleted
+sync
+
+echo "==> Disk usage before cleanup"
+echo "${DISK_USAGE_BEFORE_CLEANUP}"
+
+echo "==> Disk usage after cleanup"
+df -h
