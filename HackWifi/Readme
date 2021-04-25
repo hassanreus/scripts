@@ -1,0 +1,5 @@
+1 - crackWifi
+2 - enter your Mac address as arguments ex: => ./step2 wlp3s0
+3 - same last rule + enter in the second argument the BSSID access point ex: => ./step3 wlp3s0 18:A6:F7:CB:94:16
+
+----------------- restart your network ./restart wlp3s0
